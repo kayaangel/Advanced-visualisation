@@ -1,0 +1,453 @@
+---
+title: "Final Case Study Project"
+author: "Kayathri Angel"
+date: "2025-09-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Install Packages
+#install.packages("sf")
+#install.packages(c("cowplot", "googleway", "ggplot2", "ggrepel", 
+#"ggspatial", "libwgeom", "sf", "rnaturalearth", "rnaturalearthdata"))
+
+# Load Packages
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(sf)
+library(tidyverse)
+library("rnaturalearth")
+library("rnaturalearthdata")
+library(shiny)
+library(purrr)
+library(mapdeck)
+library(RColorBrewer)
+library(tidyverse)
+```
+
+## Data Preparation
+
+```{r Load Data}
+# Load the data from CSV
+global_powerplant_df <- read.csv("./Data/global_power_plant_database.csv")
+print(head(global_powerplant_df))
+```
+
+
+```{r}
+# Filter the original dataset to only include the USA
+USA_global_powerplant_temp <- global_powerplant_df %>%
+  filter(country == "USA")
+head(USA_global_powerplant_temp)
+```
+
+
+```{r}
+# Replace any missing values in the generated_gwh columns with estimated values from the 
+# estimated_generation_gwh columns, if available, else 0.
+years <- 2013:2019
+for (yr in years) {
+  gen_col <- paste0("generation_gwh_", yr)
+  est_col <- paste0("estimated_generation_gwh_", yr)
+  if (all(c(gen_col, est_col) %in% names(USA_global_powerplant_temp))) {
+    USA_global_powerplant_temp <- USA_global_powerplant_temp %>%
+      mutate(!!gen_col := coalesce(.data[[gen_col]], as.numeric(.data[[est_col]]))) %>%
+      mutate(!!gen_col := tidyr::replace_na(.data[[gen_col]], 0)) 
+  }
+}
+
+# Find for missing values in the data
+USA_global_powerplant_temp %>%
+  select("generation_gwh_2013", "generation_gwh_2014", "generation_gwh_2015",
+         "generation_gwh_2016", "generation_gwh_2017", "generation_gwh_2018",
+         "generation_gwh_2019") %>%
+  summarise_all(~ sum(is.na(.)))
+
+```
+
+```{r}
+# Select rows where 'generation_gwh_' have NA values
+rows_with_na <- USA_global_powerplant_temp[is.na(USA_global_powerplant_temp$generation_gwh_2018), ]
+
+print(rows_with_na)
+```
+
+
+There are no available estimates for generation_gwh in 2018 and 2019, the NA values still need to be processed as 0.
+
+```{r}
+# Drop rows with 0 values
+USA_global_powerplant_cleaned <- USA_global_powerplant_temp %>%
+  drop_na(generation_gwh_2018, generation_gwh_2019)
+
+# Confirm that all NA value rows are removed
+USA_global_powerplant_cleaned %>%
+  select("generation_gwh_2013", "generation_gwh_2014", "generation_gwh_2015",
+         "generation_gwh_2016", "generation_gwh_2017", "generation_gwh_2018",
+         "generation_gwh_2019") %>%
+  summarise_all(~ sum(is.na(.)))
+
+```
+
+
+```{r}
+# Only select the important data columsn in the dataset
+USA_global_powerplant_df <- subset(USA_global_powerplant_cleaned, 
+                                   select = -c(gppd_idnr, other_fuel1, other_fuel2, other_fuel3, source, url, 
+                                               geolocation_source, wepp_id, year_of_capacity_data, generation_data_source,
+                                               estimated_generation_note_2013, estimated_generation_note_2014,
+                                               estimated_generation_note_2015, estimated_generation_note_2016, 
+                                               estimated_generation_note_2017,
+                                               estimated_generation_gwh_2013, estimated_generation_gwh_2014,
+                                               estimated_generation_gwh_2015, estimated_generation_gwh_2016,
+                                               estimated_generation_gwh_2017))
+USA_global_powerplant_df
+```
+
+
+```{r}
+install.packages("rnaturalearthhires", repos = "https://ropensci.r-universe.dev") 
+library(rnaturalearthhires) # optional higher-res
+
+usa_states <- ne_states(country = "United States of America", returnclass = "sf")
+
+world <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf")
+
+world_mapping <- world %>%
+  select(geometry, sovereignt, name_sort) %>% 
+  filter(sovereignt == "United States of America")
+
+powerplant_sf_points <- st_as_sf(USA_global_powerplant_df, coords = c("longitude", "latitude"), crs = 4326)
+powerplant_sf_points
+
+# Project the data first, then compute bounds
+proj_crs <- st_crs("ESRI:54030")
+world_proj <- st_transform(world_mapping, proj_crs)
+states    <- st_transform(usa_states, proj_crs)
+pp2_proj    <- st_transform(powerplant_sf_points, proj_crs)
+
+# Keep only features overlapping a rough US box in lon/lat before projecting:
+us_bbox_ll <- st_bbox(c(xmin = -180, xmax = -65, ymin = -15, ymax = 70), crs = st_crs(4326))
+world_us <- st_crop(world_mapping, us_bbox_ll) %>% st_transform(proj_crs)
+
+# Get bounds in projected CRS
+b <- st_bbox(world_us)
+```
+
+
+```{r powerplants-map, fig.width=12, fig.height=8, dpi=150}
+# Transform to lon/lat (WGS84) for easy xlim/ylim in degrees
+world_us_ll <- st_transform(world_us, 4326)
+states_ll   <- st_transform(states,   4326)
+pp_ll       <- st_transform(pp2_proj, 4326)
+
+# Filter out AK and HI by longitude/latitude bounding box (keeps contiguous US)
+lon_min <- -130; lon_max <- -65
+lat_min <- 22;   lat_max <- 52
+
+pp_contig <- pp_ll %>%
+  filter(st_coordinates(.)[,1] >= lon_min,
+         st_coordinates(.)[,1] <= lon_max,
+         st_coordinates(.)[,2] >= lat_min,
+         st_coordinates(.)[,2] <= lat_max)
+
+# Convert points to simple data.frame coordinates for faster plotting & more control
+pp_coords <- pp_contig %>%
+  mutate(lon = st_coordinates(.)[,1], lat = st_coordinates(.)[,2]) %>%
+  st_set_geometry(NULL)
+```
+
+
+```{r}
+gen_cols <- c("generation_gwh_2013","generation_gwh_2014","generation_gwh_2015",
+              "generation_gwh_2016","generation_gwh_2017","generation_gwh_2018",
+              "generation_gwh_2019")
+
+# convert to a long table: one row per facility-year with its generation value
+# keep geometry for spatial operations
+pp_long <- pp_contig %>%
+  st_as_sf() %>%
+  st_transform(4326) %>%
+  mutate(id = row_number()) %>%
+  select(id, geometry, primary_fuel, name, all_of(gen_cols)) %>%   # include primary_fuel here
+  pivot_longer(cols = all_of(gen_cols),
+               names_to = "year_var",
+               values_to = "generation_gwh") %>%
+  mutate(year = sub("generation_gwh_", "", year_var))
+```
+
+
+
+```{r}
+# --- PARAMETERS ---
+cellsize <- 10000       # Size of each grid cell in meters (10 km x 10 km)
+elev_scale <- 50        # (Unused in this snippet, could be used for vertical scaling in 3D maps)
+years <- as.character(2013:2019)  # Vector of years to iterate over
+
+# --- PREP: Create a common grid extent so grids align across years ---
+# Convert input data to sf (if not already)
+pts_all <- if (!inherits(pp_long, "sf")) st_as_sf(pp_long, wkt = "geometry", crs = 4326) else pp_long
+
+# Transform points to metric projection (EPSG:3857) for consistent distance-based grids
+pts_all_m <- st_transform(pts_all, 3857)
+
+# Create bounding box around all points
+bb <- st_as_sfc(st_bbox(pts_all_m))
+
+# Create a square grid covering the bounding box
+grid_all_sfc <- st_make_grid(bb, cellsize = cellsize, square = TRUE)
+
+# Convert grid to sf object with unique cell IDs
+grid_all <- st_sf(cell_id = seq_along(grid_all_sfc), geometry = st_sfc(grid_all_sfc))
+
+# --- SET COLOUR PALETTE FOR ALL FUELS ---
+all_fuels <- sort(unique(pp_long$primary_fuel)) 
+pal_base <- "Set3"                              
+n_fuels <- length(all_fuels)                  
+maxpal <- RColorBrewer::brewer.pal.info[pal_base, "maxcolors"]  
+
+# Generate color vector for all fuel types
+cols_vec <- if (n_fuels <= maxpal) RColorBrewer::brewer.pal(n_fuels, pal_base) else
+  colorRampPalette(RColorBrewer::brewer.pal(maxpal, pal_base))(n_fuels)
+cols <- setNames(cols_vec, all_fuels)  # Named vector: fuel type -> color
+
+# --- FUNCTION: Aggregate data to grid for a single year ---
+make_grid_vis_year <- function(year_chr) {
+  
+  # Filter data for the given year and trim whitespace in fuel names
+  pp_y <- pp_long %>%
+    filter(year == year_chr) %>%
+    mutate(primary_fuel = trimws(primary_fuel))
+  
+  # Convert to sf (if not already) and transform to metric coordinates
+  pts <- if (!inherits(pp_y, "sf")) st_as_sf(pp_y, wkt = "geometry", crs = 4326) else pp_y
+  pts_m <- st_transform(pts, 3857)
+  
+  # Identify which grid cells intersect with points
+  ints <- st_intersects(grid_all, pts_m, sparse = FALSE)
+  
+  # Subset grid to only cells that contain points (for speed)
+  grid_sub <- grid_all[rowSums(ints) > 0, , drop = FALSE]
+  
+  # Spatial join: assign each point to a grid cell
+  pts_join <- st_join(pts_m, grid_sub, left = FALSE)
+  
+  # Aggregate generation by cell and fuel type
+  cell_fuel <- pts_join %>%
+    st_drop_geometry() %>%
+    group_by(cell_id, primary_fuel) %>%
+    summarise(gen = sum(generation_gwh, na.rm = TRUE), .groups = "drop")
+  
+  # Compute total generation per cell
+  cell_totals <- cell_fuel %>%
+    group_by(cell_id) %>%
+    summarise(total_gen = sum(gen, na.rm = TRUE), .groups = "drop")
+  
+  # Identify dominant fuel type per cell (highest generation)
+  dominant <- cell_fuel %>%
+    group_by(cell_id) %>%
+    slice_max(order_by = gen, n = 1, with_ties = FALSE) %>%
+    select(cell_id, primary_fuel)
+  
+  # Join totals and dominant fuel back to grid geometry
+  grid_vis <- grid_sub %>%
+    left_join(cell_totals, by = "cell_id") %>%
+    left_join(dominant, by = "cell_id") %>%
+    mutate(primary_fuel = replace_na(primary_fuel, "None"),
+           total_gen = replace_na(total_gen, 0)) %>%
+    st_transform(4326)  # Back to geographic coordinates for plotting
+  
+  # Drop empty cells and assign colors based on dominant fuel
+  grid_vis2 <- grid_vis %>%
+    filter(!is.na(total_gen) & total_gen > 0) %>%
+    mutate(primary_fuel = factor(primary_fuel, levels = sort(unique(grid_vis$primary_fuel))),
+           hex = cols[as.character(primary_fuel)]) %>%
+    mutate(hex = ifelse(primary_fuel == "None" | is.na(primary_fuel), NA_character_, hex))
+  
+  # Add HTML tooltip text for interactive map
+  grid_vis2$tooltip_info <- paste0(
+    "<b>Primary Fuel:</b> ", grid_vis2$primary_fuel, "<br/>",
+    "<b>Generated GWh:</b> ", grid_vis2$total_gen)
+  
+  # Return processed grid for the year
+  grid_vis2
+}
+
+# --- MAP CENTER (for initializing interactive map) ---
+map_center <- c(-100, 25)  # Approximate geographic center of contiguous US
+
+# --- PRECOMPUTE GRIDS FOR ALL YEARS (so slider updates are instantaneous) ---
+precomp <- setNames(vector("list", length(years)), years)
+for(i in seq_along(years)) {
+  yr <- years[i]
+  message("Precomputing year ", yr)
+  precomp[[yr]] <- make_grid_vis_year(yr)
+}
+
+```
+
+
+```{r}
+# Sum the energy produced by fuel type for each year
+results_list <- list()
+
+for (yr in years) {
+  df_year_df <- filter(pp_long, year %in% as.integer(yr))
+  
+  # aggregate by fuel type
+  agg <- df_year_df %>%
+    st_drop_geometry() %>%  
+    group_by(primary_fuel) %>%
+    summarise(total_GWh = sum(generation_gwh, na.rm = TRUE), .groups = "drop") %>%
+    mutate(year = as.integer(yr)) %>% 
+    ungroup()
+  
+  results_list[[yr]] <- agg
+}
+
+# combine all years
+results <- bind_rows(results_list)
+print(results)
+
+
+results_wide <- results %>%
+  pivot_wider(names_from = primary_fuel,
+              values_from = total_GWh,
+              values_fill = 0)
+print(results_wide)
+
+```
+
+
+
+```{r}
+
+# PARAMETERS
+
+source("Secret.R")
+
+set_param
+
+years <- sort(unique(results_wide$year))
+map_center <- c(-100, 37)
+
+ui <- fluidPage(
+  titlePanel("USA Power Plant Energy Production in Gigawatt-Hours (2013–2019)"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      # 🔹 Single YEAR slider (animates automatically)
+      sliderInput(
+        "year",
+        "Year",
+        min = min(years),
+        max = max(years),
+        value = min(years),
+        step = 1,
+        sep = "",
+        animate = animationOptions(interval = 1000, loop = TRUE)
+      ),
+      
+      selectInput("keep_fuel", "Filter by Fuel Source Type", 
+                  choices = c("All", all_fuels), selected = "All"),
+      
+      checkboxInput("show_legend", "Show Legend", value = TRUE)
+    ),
+    
+    mainPanel(
+      mapdeckOutput("map", height = "600px"),
+      uiOutput("legend_ui"),
+      tags$hr(),
+      plotOutput("linePlot", height = "250px")
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  
+  # --- INITIAL MAP ---
+  output$map <- renderMapdeck({
+    mapdeck(token = token, style = mapdeck_style("dark"), 
+            location = map_center, zoom = 4, pitch = 60)
+  })
+  
+  # --- UPDATE MAP AND LINE CHART TOGETHER ---
+  observeEvent(c(input$year, input$keep_fuel, input$show_legend), {
+    
+    yr <- as.character(input$year)
+    grid_vis2 <- precomp[[yr]]
+    
+    # Fuel filter
+    if (input$keep_fuel != "All") {
+      grid_vis2 <- grid_vis2 %>% filter(as.character(primary_fuel) == input$keep_fuel)
+    }
+    
+    # Update map
+    mapdeck_update(map_id = "map") %>%
+      clear_polygon(layer_id = "grid_cells") %>%
+      add_polygon(
+        data = grid_vis2,
+        layer_id = "grid_cells",
+        fill_colour = "hex",
+        elevation = "total_gen",
+        elevation_scale = elev_scale,
+        palette = NULL,
+        auto_highlight = TRUE,
+        tooltip = "tooltip_info",
+        update_view = FALSE
+      )
+    
+    # Legend UI
+    output$legend_ui <- renderUI({
+      if (!input$show_legend) return(NULL)
+      fuels_here <- sort(unique(as.character(grid_vis2$primary_fuel)))
+      tags$div(style = "display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;",
+               lapply(fuels_here, function(f) {
+                 tags$div(style = "display:flex; align-items:center; margin-right:8px;",
+                          tags$div(style = paste0(
+                            "width:18px; height:12px; background:", cols[f],
+                            "; margin-right:6px; border:1px solid #444;"
+                          )),
+                          tags$span(f, style = "font-size:12px;")
+                 )
+               })
+      )
+    })
+    
+    # --- LINE CHART (always starts from 2013 up to current year) ---
+    output$linePlot <- renderPlot({
+      
+      fuel_cols <- if (input$keep_fuel == "All") all_fuels else input$keep_fuel
+      
+      data_long <- results_wide %>%
+        select(year, all_of(fuel_cols)) %>%
+        pivot_longer(cols = -year, names_to = "fuel", values_to = "GWh") %>%
+        filter(year >= min(years), year <= input$year)
+      
+      ggplot(data_long, aes(x = year, y = GWh, color = fuel)) +
+        geom_line(size = 1.5) +
+        geom_point(size = 3) +
+        scale_color_manual(values = cols) +
+        scale_x_continuous(
+          breaks = years,
+          limits = range(as.numeric(years))
+        ) +
+        labs(
+          title = paste0("Generation Trends by Fuel Type (2013–", input$year, ")"),
+          x = "Year",
+          y = "Total Generation (GWh)"
+        ) +
+        theme_minimal() +
+        theme(legend.position = "none")
+    })
+    
+  }, ignoreNULL = FALSE)
+}
+
+shinyApp(ui, server)
+
+```
+
