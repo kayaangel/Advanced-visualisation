@@ -3,6 +3,9 @@
 ## Summary
 This R Markdown file contains a comprehensive case study on USA power plant energy production (2013–2019). It builds an interactive Shiny dashboard with spatial visualization and time-series analysis.
 
+#### Video Demo of Dashboard
+[![Watch the video](https://raw.githubusercontent.com/kayaangel/Advanced-visualisation/main/Video_Demo_Thumnail.png)](https://raw.githubusercontent.com/kayaangel/Advanced-visualisation/main/Video_Demo.mp4)
+
 ## Key Sections
 
 ### Data Preparation
@@ -30,8 +33,6 @@ Slider: Year selector (2013–2019) with auto-animation
 Filter: Toggle by specific fuel source or view all
 Legend: Dynamic legend showing fuel types in current view
 Line Chart: Time-series plot tracking generation trends by fuel type from 2013 to the selected year
-
-[![Watch the video](https://raw.githubusercontent.com/kayaangel/Advanced-visualisation/main/Video_Demo_Thumnail.png)](https://raw.githubusercontent.com/kayaangel/Advanced-visualisation/main/Video_Demo.mp4)
 
 ### Technical Details
 
