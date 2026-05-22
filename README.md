@@ -4,7 +4,7 @@
 This R Markdown file contains a comprehensive case study on USA power plant energy production (2013–2019). It builds an interactive Shiny dashboard with spatial visualization and time-series analysis.
 
 #### Video Demo of Dashboard
-[![Watch the video](https://raw.githubusercontent.com/kayaangel/Advanced-visualisation/main/Video_Demo_Thumnail.png)](https://github.com/kayaangel/Advanced-visualisation/main/Video\Demo.mp4)
+[![Watch the video](https://raw.githubusercontent.com/kayaangel/Advanced-visualisation/main/Video_Demo_Thumnail.png)](https://github.com/kayaangel/Advanced-visualisation/main/Video%20Demo.mp4)
 
 ## Key Sections
 
